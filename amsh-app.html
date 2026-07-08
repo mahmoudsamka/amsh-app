@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>AMSH — مساعدك التقني</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; background: #0D1012; }
+  body { font-family: 'Inter', system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #232A2C; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ============================================================
+  إعداد سيرفرك الخاص:
+  1) انشر الـ Cloudflare Worker (شرحناه في الشات) وحط رابطه هنا تحت.
+  2) بدون هذا، الدردشة الذكية لن تعمل خارج بيئة Claude.ai.
+============================================================= -->
+<script>
+  const PROXY_URL = "https://amsh-proxy.samka-x-elmal3on.workers.dev";
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+/* ---------- الألوان (ثيم حديث/احترافي) ---------- */
+const C = {
+  bg: "#0D1012",
+  panel: "#15181B",
+  raised: "#1D2124",
+  border: "#232A2C",
+  accent: "#22D3B0",
+  accentDim: "#0F766E",
+  textHi: "#F1F5F3",
+  textLo: "#8B959A",
+  ok: "#34D399",
+  err: "#F87171",
+};
+const FONT_DISPLAY = "'Space Grotesk', sans-serif";
+const FONT_MONO = "'JetBrains Mono', monospace";
+
+const WHATSAPP_NUMBER = "201109330761";
+const SUPPORT_EMAIL = "privmahmoudelshabrawy@gmail.com";
+const DEVELOPER_NAME = "Mahmoud Elshabrawy";
+
+const SYSTEM_PROMPT = `You are AMSH, a highly competent programming and technical assistant.
+Language rules:
+- The user mainly writes in Egyptian Arabic colloquial (عامية مصرية) — words like "عاوز", "مفيش", "كدا", "خلصت". Understand it natively and reply in the SAME Egyptian colloquial register by default, not Modern Standard Arabic, unless the user switches to MSA or English.
+- Mirror the user's dialect and tone; stay warm but efficient.
+Technical rules:
+- Be direct and practical. Use code blocks with correct language tags.
+- Give exact runnable shell commands when relevant.
+- No filler, no disclaimers padding. Straight to the solution.
+- If ambiguous, state your assumption in one short line, then proceed.
+- Environment constraint: only \`\`\`js blocks execute live in this UI. Other languages can be written/explained/downloaded but not executed here. Never claim to have run something you didn't.`;
+
+/* ---------- تخزين محلي (بديل window.storage خارج Claude.ai) ---------- */
+const localStore = {
+  async get(key) {
+    const v = localStorage.getItem(key);
+    if (v === null) throw new Error("not found");
+    return { value: v };
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+function useTicker() {
+  const [blink, setBlink] = useState(true);
+  useEffect(() => {
+    const id = setInterval(() => setBlink((b) => !b), 550);
+    return () => clearInterval(id);
+  }, []);
+  return blink;
+}
+
+const RUNNABLE = new Set(["js", "javascript", "jsx"]);
+
+function runJs(code) {
+  const logs = [];
+  const fakeConsole = {
+    log: (...a) => logs.push(a.map((x) => (typeof x === "object" ? JSON.stringify(x, null, 2) : String(x))).join(" ")),
+    error: (...a) => logs.push("✕ " + a.map(String).join(" ")),
+    warn: (...a) => logs.push("⚠ " + a.map(String).join(" ")),
+  };
+  try {
+    const fn = new Function("console", `"use strict";\n${code}`);
+    const result = fn(fakeConsole);
+    if (result !== undefined) logs.push("→ " + (typeof result === "object" ? JSON.stringify(result) : String(result)));
+    if (logs.length === 0) logs.push("(نُفّذ بدون أي مخرجات)");
+    return { ok: true, output: logs.join("\n") };
+  } catch (e) {
+    return { ok: false, output: "✕ " + e.message };
+  }
+}
+
+function downloadText(filename, content) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function extForLang(lang) {
+  const map = { js: "js", javascript: "js", jsx: "jsx", python: "py", py: "py", bash: "sh", sh: "sh", html: "html", css: "css", json: "json", sql: "sql", php: "php", ruby: "rb", java: "java", c: "c", cpp: "cpp", go: "go", rust: "rs", typescript: "ts", ts: "ts" };
+  return map[(lang || "").toLowerCase()] || "txt";
+}
+
+function CodeBlock({ lang, code, blockKey }) {
+  const [copied, setCopied] = useState(false);
+  const [runResult, setRunResult] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(code);
+  const [saved, setSaved] = useState(false);
+  const [persisted, setPersisted] = useState(false);
+  const isRunnable = RUNNABLE.has((lang || "").toLowerCase());
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await localStore.get(`edit:${blockKey}`);
+        if (res && !cancelled) { setDraft(res.value); setPersisted(true); }
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [blockKey]);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(draft).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  };
+  const run = () => {
+    setRunning(true);
+    setTimeout(() => { setRunResult(runJs(draft)); setRunning(false); }, 120);
+  };
+  const download = () => downloadText(`snippet.${extForLang(lang)}`, draft);
+  const saveEdit = async () => {
+    try { await localStore.set(`edit:${blockKey}`, draft); } catch {}
+    setPersisted(true);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1200);
+    setEditing(false);
+  };
+
+  const btn = (extra) => ({
+    background: "none", border: `1px solid ${C.border}`, color: C.textLo,
+    borderRadius: 6, fontSize: 10.5, padding: "3px 9px", cursor: "pointer",
+    fontFamily: FONT_MONO, ...extra,
+  });
+
+  return (
+    <div style={{ margin: "10px 0", border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.raised, padding: "7px 12px", fontFamily: FONT_MONO, fontSize: 11, color: C.textLo, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+        <span>{lang || "code"}{persisted && <span style={{ color: C.accent, margin: "0 6px" }}>· مُعدَّل</span>}</span>
+        <div style={{ display: "flex", gap: 6 }}>
+          {editing ? (
+            <button onClick={saveEdit} style={btn({ background: C.accent, color: "#08110F", border: `1px solid ${C.accent}`, fontWeight: 700 })}>{saved ? "تم الحفظ" : "حفظ التعديل"}</button>
+          ) : (
+            <button onClick={() => setEditing(true)} style={btn()}>تعديل</button>
+          )}
+          {isRunnable && <button onClick={run} disabled={running} style={btn({ color: C.accent })}>{running ? "…" : "تشغيل"}</button>}
+          <button onClick={download} style={btn()}>حفظ ملف</button>
+          <button onClick={copy} style={btn({ color: copied ? C.ok : C.textLo })}>{copied ? "تم النسخ" : "نسخ"}</button>
+        </div>
+      </div>
+      {editing ? (
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false}
+          rows={Math.min(20, Math.max(4, draft.split("\n").length))}
+          style={{ width: "100%", boxSizing: "border-box", padding: "12px 14px", background: C.bg, color: C.textHi, fontFamily: FONT_MONO, fontSize: 13, lineHeight: 1.55, border: "none", outline: `1px solid ${C.accent}`, resize: "vertical" }} />
+      ) : (
+        <pre style={{ margin: 0, padding: "12px 14px", background: C.bg, color: C.textHi, fontFamily: FONT_MONO, fontSize: 13, overflowX: "auto", lineHeight: 1.55, direction: "ltr", textAlign: "left" }}><code>{draft}</code></pre>
+      )}
+      {runResult && (
+        <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 14px", background: runResult.ok ? "#0E1712" : "#1A1112", fontFamily: FONT_MONO, fontSize: 12.5, color: runResult.ok ? C.ok : C.err, whiteSpace: "pre-wrap", direction: "ltr", textAlign: "left" }}>{runResult.output}</div>
+      )}
+    </div>
+  );
+}
+
+function renderContent(text, msgKey) {
+  const parts = text.split(/```(\w*)\n?([\s\S]*?)```/g);
+  const nodes = [];
+  for (let i = 0; i < parts.length; i += 3) {
+    if (parts[i]) nodes.push(<p key={`t${i}`} style={{ margin: "0 0 8px 0", whiteSpace: "pre-wrap" }}>{parts[i].trim()}</p>);
+    if (parts[i + 2] !== undefined) nodes.push(<CodeBlock key={`c${i}`} blockKey={`${msgKey}-${i}`} lang={parts[i + 1]} code={parts[i + 2].replace(/\n$/, "")} />);
+  }
+  return nodes.length ? nodes : <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{text}</p>;
+}
+
+function DevPanel({ onClose }) {
+  const supportMailto = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("دعم سريع - AMSH")}&body=${encodeURIComponent("مرحباً محمود،\n\nمحتاج مساعدة في:\n")}`;
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, width: "100%", maxWidth: 380, padding: 24 }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.accent, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 14 }}>عن المطوّر</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, color: C.textHi, marginBottom: 4 }}>{DEVELOPER_NAME}</div>
+        <div style={{ fontSize: 13, color: C.textLo, marginBottom: 22, lineHeight: 1.6 }}>مطوّر ومالك تطبيق AMSH — كل التحديثات بإشرافه المباشر.</div>
+        <a href={`https://wa.me/${WHATSAPP_NUMBER}`} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#1FAA59", color: "#08110F", textDecoration: "none", fontWeight: 700, fontSize: 14, padding: "13px 14px", borderRadius: 10, marginBottom: 10 }}>تواصل عبر واتساب</a>
+        <a href={supportMailto} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "none", border: `1px solid ${C.accent}`, color: C.accent, textDecoration: "none", fontWeight: 700, fontSize: 14, padding: "13px 14px", borderRadius: 10, marginBottom: 20 }}>دعم سريع الآن — إرسال إيميل مباشر</a>
+        <div style={{ fontSize: 11, color: C.textLo, fontFamily: FONT_MONO, marginBottom: 6, textAlign: "center", direction: "ltr" }}>+20 110 933 0761</div>
+        <div style={{ fontSize: 11, color: C.textLo, fontFamily: FONT_MONO, marginBottom: 18, textAlign: "center", direction: "ltr", wordBreak: "break-all" }}>{SUPPORT_EMAIL}</div>
+        <button onClick={onClose} style={{ width: "100%", background: C.raised, border: `1px solid ${C.border}`, color: C.textHi, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontSize: 13 }}>إغلاق</button>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [messages, setMessages] = useState([
+    { role: "assistant", content: "AMSH جاهز.\nاكتب اللي محتاجه — كود، شرح، أوامر، أي حاجة تقنية." },
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [showDev, setShowDev] = useState(false);
+  const scrollRef = useRef(null);
+  const blink = useTicker();
+
+  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages, loading]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    const nextMessages = [...messages, { role: "user", content: text }];
+    setMessages(nextMessages);
+    setInput("");
+    setLoading(true);
+    setError(null);
+
+    if (!PROXY_URL || PROXY_URL.includes("PASTE_YOUR_WORKER_URL_HERE")) {
+      setError("لسه ما حطيتش رابط السيرفر الخاص بيك (PROXY_URL) فوق في الكود.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const apiMessages = nextMessages
+        .filter((m, idx) => !(m.role === "assistant" && idx === 0))
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      const response = await fetch(PROXY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, system: SYSTEM_PROMPT, messages: apiMessages }),
+      });
+      if (!response.ok) throw new Error("API error " + response.status);
+      const data = await response.json();
+      const textBlocks = (data.content || []).filter((b) => b.type === "text").map((b) => b.text);
+      setMessages((prev) => [...prev, { role: "assistant", content: textBlocks.join("\n") || "لم يصل رد." }]);
+    } catch (e) {
+      setError("صار خطأ بالاتصال. تأكد من رابط السيرفر وحاول تاني.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onKeyDown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
+
+  return (
+    <div style={{ height: "100vh", width: "100%", background: C.bg, color: C.textHi, display: "flex", flexDirection: "column" }}>
+      {/* Header */}
+      <div style={{ borderBottom: `1px solid ${C.border}`, padding: "16px 18px", display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 34, height: 34, borderRadius: 10, background: C.accent, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_DISPLAY, fontWeight: 700, color: "#08110F", fontSize: 15 }}>A</div>
+        <div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16, color: C.textHi }}>AMSH</div>
+          <div style={{ fontSize: 11, color: C.textLo }}>{loading ? "بيفكر…" : "جاهز"}</div>
+        </div>
+        <button onClick={() => setShowDev(true)} style={{ marginRight: "auto", background: C.raised, border: `1px solid ${C.border}`, color: C.accent, borderRadius: 8, fontSize: 12, padding: "7px 12px", cursor: "pointer" }}>المطوّر</button>
+      </div>
+
+      {/* Messages */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ maxWidth: 560, width: "100%", alignSelf: m.role === "user" ? "flex-start" : "flex-end" }}>
+            <div style={{ fontSize: 10.5, color: C.textLo, marginBottom: 4, textAlign: m.role === "user" ? "right" : "left" }}>{m.role === "user" ? "إنت" : "AMSH"}</div>
+            <div style={{ background: m.role === "user" ? C.accentDim + "22" : C.panel, border: `1px solid ${m.role === "user" ? C.accentDim : C.border}`, borderRadius: 14, padding: "13px 15px", fontSize: 14.5, lineHeight: 1.7 }}>
+              {renderContent(m.content, `msg${i}`)}
+            </div>
+          </div>
+        ))}
+        {loading && <div style={{ fontFamily: FONT_MONO, fontSize: 13, color: C.textLo }}>{blink ? "▍" : " "}</div>}
+        {error && <div style={{ color: C.err, fontSize: 13 }}>{error}</div>}
+      </div>
+
+      {/* Input */}
+      <div style={{ borderTop: `1px solid ${C.border}`, padding: 14, display: "flex", gap: 10, alignItems: "flex-end" }}>
+        <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKeyDown} rows={1}
+          placeholder="اكتب رسالتك…"
+          style={{ flex: 1, resize: "none", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, color: C.textHi, padding: "12px 14px", fontSize: 14, outline: "none", fontFamily: "'Inter', sans-serif" }} />
+        <button onClick={send} disabled={loading || !input.trim()}
+          style={{ background: loading || !input.trim() ? C.raised : C.accent, color: loading || !input.trim() ? C.textLo : "#08110F", border: "none", borderRadius: 12, width: 46, height: 46, fontSize: 18, fontWeight: 700, cursor: loading || !input.trim() ? "default" : "pointer" }}>↑</button>
+      </div>
+      {showDev && <DevPanel onClose={() => setShowDev(false)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
